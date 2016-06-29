@@ -1,0 +1,325 @@
+#!/usr/bin/env ruby
+
+require "optparse"
+
+require "json"
+require "fileutils"
+require "date"
+
+module Listo
+  module Parser
+
+    def self.blank?(string)
+      string == nil || string == ""
+    end
+
+    def self.parse(options)
+      args = {
+        tail: true,
+        size: 1,
+        file: "~/.listo/queue.json",
+        silent: false,
+        all: false,
+        dump: false
+      }
+
+      opt_parser = OptionParser.new do |opts|
+
+        opts.banner = "Usage: queue [options]"
+
+        opts.on("-p", "--push", "Add an item") do
+          args[:command] = :push
+        end
+
+        opts.on("-c", "--content=CONTENT", "Content to store") do |content|
+          args[:content] = content
+        end
+
+        opts.on("-s", "--show", "Show an item") do
+          args[:command] = :show
+        end
+
+        opts.on("-d", "--drop", "Drops an item") do
+          args[:command] = :drop
+        end
+
+        opts.on("-h", "--head", "Perform the command on the head of the queue") do
+          args[:tail] = false
+        end
+
+        opts.on("-t", "--tail", "Perform the command on the tail of the queue [Default behavior]") do
+          args[:tail] = true
+        end
+
+        opts.on("--size=SIZE", Integer, "Shows a set of SIZE items [Defaults to `1`]") do |size|
+          if size >= 1
+            args[:size] = size
+          else
+            puts "`size` must be a positive number"
+            puts opts
+            exit
+          end
+        end
+
+        opts.on("--all", "Shows all the items in the queue") do
+          args[:all] = true
+        end
+
+        opts.on("--id=ID", "Shows the item having the id equals to ID") do |id|
+          args[:id] = id
+        end
+
+        opts.on("-f", "--file=FILE", "Use FILE as the queue storage [Defaults to `queue.json`]") do |file|
+          args[:file] = file
+        end
+
+        opts.on("-h", "--help", "Prints this help") do
+          puts opts
+          exit
+        end
+
+        opts.on("--silent", "Suppresses the output") do
+          args[:silent] = true
+        end
+
+        opts.on("--dump", "Prints the JSON representation of the items") do
+          args[:dump] = true
+        end
+
+        opts.on("--setup", "Creates the empty queue at the specified path") do
+          args[:command] = :setup
+        end
+      end
+
+      opt_parser.parse!(options)
+
+      args[:file] = File.expand_path(args[:file])
+      case args[:command]
+      when :push
+        if blank?(args[:content])
+          puts "Please specify a `content` to store:"
+          puts "\tqueue push --content=CONTENT"
+          exit
+        end
+      when :show
+        # do nothing
+      when :drop
+        # do nothing
+      when :setup
+        # do nothing
+      else
+        puts "You need to specify the command"
+        puts opt_parser
+        exit
+      end
+
+      return args
+    end
+
+  end
+
+  module Queue
+
+    def self.setup(file:, verbose: true)
+      FileUtils.mkdir_p(File.dirname(full_path))
+      File.write(full_path, JSON.pretty_generate([]))
+      if verbose
+        puts "The queue has been created at #{file}"
+      end
+    end
+
+    def self.push(content:, file:, tail:, verbose: true)
+      if !File.exists?(file)
+        puts "File #{file} doesn't exist. Please use the `--setup` command first."
+        exit
+      end
+      data = file_content(file: file)
+      id = generate_id(data: data)
+      item = {
+        "id" => id,
+        "content" => content,
+        "created_at" => Time.now.to_s,
+      }
+      if tail
+        data.push(item)
+      else
+        data = [item] + data
+      end
+      store_file(file: file, data: data)
+      if verbose
+        puts "Item ##{id} pushed."
+      end
+    end
+
+    def self.show(size:, file:, tail:, all: false, dump: false)
+      if !File.exists?(file)
+        puts "File #{file} doesn't exist. Please use the `--setup` command first."
+        exit
+      end
+      data = file_content(file: file)
+      if data.count > 0
+        items = if tail
+          if all
+            size = data.count
+          end
+          data[(data.count - size)..data.count]
+        else
+          data[0..(size - 1)]
+        end
+        sorted_list = (tail ? items.reverse : items)
+        if dump
+          puts JSON.pretty_generate(sorted_list)
+        else
+          sorted_list.each do |item|
+            print_item(item: item)
+          end
+        end
+      else
+        puts "The queue is empty."
+      end
+    end
+
+    def self.show_by_id(id:, file:, dump: false)
+      if !File.exists?(file)
+        puts "File #{file} doesn't exist. Please use the `--setup` command first."
+        exit
+      end
+      data = file_content(file: file)
+      item = data.find do |x|
+        x["id"] == id
+      end
+      if item
+        if dump
+          puts JSON.pretty_generate(item)
+        else
+          print_item(item: item)
+        end
+      else
+        puts "Can't find item with id: #{id}"
+        puts "The queue has #{data.count} items."
+      end
+    end
+
+    def self.drop(size:, file:, tail:, verbose: true, all: false)
+      if !File.exists?(file)
+        puts "File #{file} doesn't exist. Please use the `--setup` command first."
+        exit
+      end
+      data = file_content(file: file)
+      if all
+        store_file(file: file, data: [])
+        if verbose
+          puts "Queue emptied."
+        end
+      else
+        item = if tail
+          data.pop
+        else
+          data.shift
+        end
+        if item
+          if verbose
+            puts "Dropped the following item:"
+            print_item(item: item)
+          end
+          store_file(file: file, data: data)
+        else
+          puts "Can't drop, the queue is empty."
+        end
+      end
+    end
+
+    def self.drop_by_id(id:, file:, verbose: true)
+      if !File.exists?(file)
+        puts "File #{file} doesn't exist. Please use the `--setup` command first."
+        exit
+      end
+      data = file_content(file: file)
+      item_index = data.find_index do |x|
+        x["id"] == id
+      end
+      if item_index
+        item = data.delete_at(item_index)
+        if verbose
+          print_item(item: item)
+        end
+        store_file(file: file, data: data)
+      else
+        puts "Can't find item with id: #{id}"
+        puts "The queue has #{data.count} items."
+      end
+    end
+
+    private
+
+      def self.print_item(item:)
+        created_at = DateTime.parse(item["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
+        puts "##{item["id"]} (#{created_at}) #{item["content"]}"
+      end
+
+      def self.file_content(file:)
+        JSON.parse(File.read(file))
+      end
+
+      def self.store_file(file:, data:)
+        File.write(file, JSON.pretty_generate(data))
+      end
+
+      def self.generate_id(data:)
+        (data.map {|item| item["id"]}.map(&:to_i).max || 0) + 1
+      end
+
+  end
+end
+
+options = Listo::Parser.parse(ARGV)
+case options[:command]
+when :setup
+  Listo::Queue.setup(
+    file: options[:file],
+    verbose: !options[:silent]
+  )
+when :push
+  Listo::Queue.push(
+    content: options[:content],
+    file: options[:file],
+    tail: options[:tail],
+    verbose: !options[:silent]
+  )
+when :show
+  if options[:id]
+    Listo::Queue.show_by_id(
+      id: options[:id].to_i,
+      file: options[:file],
+      dump: options[:dump]
+    )
+  else
+    Listo::Queue.show(
+      size: options[:size],
+      file: options[:file],
+      tail: options[:tail],
+      all: options[:all],
+      dump: options[:dump]
+    )
+  end
+when :drop
+  if options[:id]
+    Listo::Queue.drop_by_id(
+      id: options[:id],
+      file: options[:file],
+      verbose: !options[:silent]
+    )
+  else
+    Listo::Queue.drop(
+      size: options[:size],
+      file: options[:file],
+      tail: options[:tail],
+      verbose: !options[:silent],
+      all: options[:all]
+    )
+  end
+else
+  # shouldn't happen
+  raise "Command #{options[:command]} is not known."
+  exit 1
+end
