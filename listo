@@ -121,8 +121,8 @@ module Listo
   module Queue
 
     def self.setup(file:, verbose: true)
-      FileUtils.mkdir_p(File.dirname(full_path))
-      File.write(full_path, JSON.pretty_generate([]))
+      FileUtils.mkdir_p(File.dirname(file))
+      File.write(file, JSON.pretty_generate([]))
       if verbose
         puts "The queue has been created at #{file}"
       end
